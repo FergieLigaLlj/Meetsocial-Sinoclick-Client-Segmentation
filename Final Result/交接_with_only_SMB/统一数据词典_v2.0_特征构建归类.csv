@@ -1,0 +1,21 @@
+﻿参考识别的字段,corporation_id,corporation_name,,,,
+数值型的字段,total_account_count,month_avg_account_count,total_ad_count,month_avg_ad_count,total_campaign_count,month_avg_campaign_count
+数值型的字段,month_avg_topup_amt,month_avg_topup_cnt,month_avg_spendaccount_num,spendacc2applyopen_ratio,month_avg_spend_amt,first_30d_topup_amt
+数值型的字段,first_7d_spend_usd,d8_to_d30_spend_usd,d31_to_d60_spend_usd,d61_to_d90_spend_usd,d91_plus_spend_usd,last_7d_spend_usd
+数值型的字段,last_d8_to_d30_spend_usd,last_d31_to_d60_spend_usd,last_d61_to_d90_spend_usd,last_d91_plus_spend_usd,,
+数值型的字段,max_month_spendbyfirst_month_spend,max_month_spendbylast_month_spend,month_std2avg,value_concentration_index,financial_runway_months,
+数值型的字段,ratio_avg_daily_spend_max_to_first,ratio_avg_daily_spend_max_to_last,value_concentration_index_daily,,,
+数值型的字段,days_since_last_spend（比较特殊，从小往大排：rank 1-2839：4；rank 2840 - 5024：3；rank 5025 - 7513：2；rank 7514 - 9999：1）,,,fb_spend_by_full_spend_ratio,tt_spend_by_full_spend_ratio,
+数值型的字段,gg_spend_by_full_spend_ratio,fb_tt_gg_spend_by_full_spend_ratio,avg_monthly_active_days,avg_monthly_event_count,avg_monthly_distinct_l3_count,
+数值型的字段,avg_monthly_distinct_l4_count,month_avg_country_count,month_avg_continent_count,month_avg_custom_region_count,,
+数值型的字段,top_custom_region_spend_ratio,core_category_count (值域：0，1，2，3，4),consumed_level2_category_count,consumed_level3_category_count,,
+数值型的字段,channel_count（值域：1，2，3，4，5，6，7，8，9，10，11）,,,,,
+低基数有序字段,corporation_size（3个）,ads_team_size（很多unknown，客户不愿意提供和unknown清洗成0）（6个）,onboarding_intent_tier（6个）,,,
+低基数无序描述性字段,business_background（很多unknown，需要清洗成”未知”）（6个）,main_regions（每个用户都是一个拼接的值，却是TOP7的消耗的国家的拼接，有可能存在不满7个的情况）,,,,
+中基数无序描述性字段,corporation_promotion_channel_second（16个）,top_l2_category（27个）,top_l3_category_feature（15个）,top_custom_region_all（12个）,,
+中基数无序描述性字段,top_custom_region_fb（12个）,top_custom_region_tt（13个）,top_custom_region_gg（13个）,main_media（16个）,,
+高基数无序描述性字段,top_l3_category（101个）,top_l2_l3_combined（114个）,top_l4_category_feature（34个）,,,
+抛弃的字段，完全不适用,top_l2_and_l3_concatenated,,,,,
+1/0标签,is_concatenated_equal_to_combined (有'无法比较'，需要标注为2.),,core_feature_adoption_flag,is_core_category_clothing,,
+1/0标签,is_core_category_accessories,is_core_category_beauty,is_core_category_electronics,has_high_risk_flag_real_money,,
+1/0标签,has_high_risk_flag_counterfeit,has_high_risk_flag_cheat,has_high_risk_flag_gambling,,,

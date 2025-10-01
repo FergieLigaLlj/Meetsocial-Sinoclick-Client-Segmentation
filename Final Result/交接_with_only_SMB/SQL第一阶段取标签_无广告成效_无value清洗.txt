@@ -1,0 +1,1503 @@
+-- ********************************************************************--																		
+--临时总宽表：sino_dc_ads_dev.tmp_client_segmentation_raw_no_advertising_effect_20250807																		
+-- author:杨宜树																		
+-- create time:2025-07-24 10:01:16																		
+-- ********************************************************************--																		
+-- ********************************************************************--																		
+-- *********************客户基础属性信息***************************--																		
+-- ********************************************************************--																		
+DROP TABLE IF EXISTS sino_dc_ads_dev.tmp_client_segmentation_basic_info_spending_digits_20250805;																		
+CREATE TABLE sino_dc_ads_dev.tmp_client_segmentation_basic_info_spending_digits_20250805 LIFECYCLE 60 AS																		
+																		
+-- 这个WITH子句模块主要是用来构建客户的基础画像信息																		
+WITH base_clients_1 AS (																		
+    -- 步骤一：先从客户主表里把我们的目标客户圈出来。																		
+    -- 这里的筛选逻辑是：只要那些有过消耗的客户，因为没花过钱的客户不在我们这次分析的范围内。																		
+    SELECT																		
+        corporation_id,																		
+        corporation_name,																		
+        corporation_size,																		
+        corporation_promotion_channel_second,																		
+        register_time,																		
+        first_spend_date,																		
+        business_background,																		
+        total_spend_months,																		
+        ads_team_size																		
+    FROM																		
+        sino_dc_ads.ads_admkt_cust_gcc_corporation_detail_df																		
+    WHERE																		
+        dt = '20250728'																		
+        AND first_spend_date IS NOT NULL																		
+),																		
+account_counts AS (																		
+    -- 步骤二：计算每个客户总共开了多少个广告账户。																		
+    -- 用 corporation_id 来分组，然后对 account_id 去重计数。																		
+    SELECT																		
+        corporation_id,																		
+        COUNT(DISTINCT account_id) AS total_account_count																		
+    FROM																		
+        sino_dc_ads.ads_admkt_cust_pub_account_relation																		
+    WHERE																		
+        dt BETWEEN '20250704' AND '20250728'																		
+        AND corporation_id IN (SELECT corporation_id FROM base_clients_1) -- 只计算我们目标客户的																		
+    GROUP BY																		
+        corporation_id																		
+)																		
+,																		
+ad_campaign_counts AS (																		
+    -- 步骤三：计算每个客户总共创建了多少广告（ad）和广告系列（campaign）。																		
+    -- 逻辑和上一步类似，都是按公司分组后去重计数。																		
+    SELECT																		
+        corporation_id,																		
+        COUNT(DISTINCT ad_id) AS total_ad_count,																		
+        COUNT(DISTINCT campaign_id) AS total_campaign_count																		
+    FROM																		
+        sino_dc_ads.ads_admkt_adver_pub_multi_channel_country_ad_di																		
+    WHERE																		
+        dt BETWEEN '20221231' AND '20250728'																		
+        AND corporation_id IN (SELECT corporation_id FROM base_clients_1) -- 同样只计算我们目标客户的																		
+    GROUP BY																		
+        corporation_id																		
+)																		
+,																		
+client_basic_info_full_metric as																		
+(SELECT																		
+    b.corporation_id,																		
+    b.corporation_name,																		
+    -- 总开户数，用COALESCE处理一下null值，防止后面计算出错																		
+    COALESCE(ac.total_account_count, 0) AS total_account_count,																		
+    -- 月均开户数 = 总开户数 / 总消耗月数																		
+    CASE																		
+        WHEN COALESCE(b.total_spend_months, 0) > 0 THEN COALESCE(ac.total_account_count, 0) / b.total_spend_months																		
+        ELSE 0																		
+    END AS month_avg_account_count,																		
+																		
+    -- 总广告数																		
+    COALESCE(adc.total_ad_count, 0) AS total_ad_count,																		
+    -- 月均广告数																		
+    CASE																		
+        WHEN COALESCE(b.total_spend_months, 0) > 0 THEN COALESCE(adc.total_ad_count, 0) / b.total_spend_months																		
+        ELSE 0																		
+    END AS month_avg_ad_count,																		
+																		
+    -- 总广告系列数																		
+    COALESCE(adc.total_campaign_count, 0) AS total_campaign_count,																		
+    -- 月均广告系列数																		
+    CASE																		
+        WHEN COALESCE(b.total_spend_months, 0) > 0 THEN COALESCE(adc.total_campaign_count, 0) / b.total_spend_months																		
+        ELSE 0																		
+    END AS month_avg_campaign_count,																		
+																		
+    -- 清洗一下公司规模字段，把各种空值、\N之类的都统一成'Unknown'																		
+    CASE																		
+        WHEN b.corporation_size IS NULL OR b.corporation_size = '\N' OR b.corporation_size = '(Empty)'																		
+        THEN 'Unknown'																		
+        ELSE b.corporation_size																		
+    END AS corporation_size,																		
+																		
+    -- 清洗推广渠道字段																		
+    CASE																		
+        WHEN b.corporation_promotion_channel_second IS NULL OR b.corporation_promotion_channel_second = '\N'																		
+        THEN 'Unknown'																		
+        ELSE b.corporation_promotion_channel_second																		
+    END AS corporation_promotion_channel_second,																		
+    -- 清洗业务背景字段																		
+    CASE																		
+        WHEN COALESCE(b.business_background,'') = ''																		
+        THEN 'Unknown'																		
+        Else b.business_background																		
+    END AS business_background,																		
+    -- 清洗广告团队规模字段																		
+    CASE																		
+        WHEN COALESCE(b.ads_team_size,'') = ''																		
+        THEN 'Unknown'																		
+        ELSE b.ads_team_size																		
+    END AS ads_team_size,																		
+    -- 这个字段是看客户的起量意愿，或者说转化速度																		
+    CASE																		
+        -- 如果注册时间为空，或者首次消耗日期早于注册日期（数据可能有点问题），我们统一归为'历史老客'																		
+        WHEN b.register_time IS NULL OR TO_DATE(b.first_spend_date, 'yyyy-mm-dd') < TO_DATE(b.register_time, 'yyyy-mm-dd hh:mi:ss') THEN '历史老客'																		
+        -- 如果首次消耗日期为空，说明只注册了没花钱																		
+        WHEN b.first_spend_date IS NULL THEN '注册未转化'																		
+        -- 其他情况，就计算注册到首次消耗的时间差，划分不同档位																		
+        ELSE																		
+            CASE																		
+                WHEN DATEDIFF(TO_DATE(b.first_spend_date, 'yyyy-mm-dd'), TO_DATE(b.register_time, 'yyyy-mm-dd hh:mi:ss'), 'dd') <= 15 THEN '15日内启动投放'																		
+                WHEN DATEDIFF(TO_DATE(b.first_spend_date, 'yyyy-mm-dd'), TO_DATE(b.register_time, 'yyyy-mm-dd hh:mi:ss'), 'dd') <= 30 THEN '30日内启动投放'																		
+                WHEN DATEDIFF(TO_DATE(b.first_spend_date, 'yyyy-mm-dd'), TO_DATE(b.register_time, 'yyyy-mm-dd hh:mi:ss'), 'dd') <= 60 THEN '60日内启动投放'																		
+                WHEN DATEDIFF(TO_DATE(b.first_spend_date, 'yyyy-mm-dd'), TO_DATE(b.register_time, 'yyyy-mm-dd hh:mi:ss'), 'dd') <= 90 THEN '90日内启动投放'																		
+                WHEN DATEDIFF(TO_DATE(b.first_spend_date, 'yyyy-mm-dd'), TO_DATE(b.register_time, 'yyyy-mm-dd hh:mi:ss'), 'dd') > 90 THEN '90日以上启动投放'																		
+                ELSE '其他'																		
+            END																		
+    END AS onboarding_intent_tier																		
+																		
+ FROM																		
+    base_clients_1 b																		
+ LEFT JOIN																		
+    account_counts ac ON b.corporation_id = ac.corporation_id																		
+ LEFT JOIN																		
+    ad_campaign_counts adc ON b.corporation_id = adc.corporation_id																		
+ ),																		
+--*********************************************End_Line*****************************************--																		
+-- ********************************************************************--																		
+-- *********************客户消耗属性信息***************************--																		
+-- ********************************************************************--																		
+base_clients_2 AS (																		
+    -- 同样，先从客户主表里把消耗相关的字段拿出来																		
+    SELECT																		
+        corporation_id,																		
+        month_avg_topup_amt,																		
+        month_avg_topup_cnt,																		
+        total_spend_account_num,																		
+        total_applyopen_account_num,																		
+        total_spend_months,																		
+        total_spend_amt																		
+    FROM																		
+        sino_dc_ads.ads_admkt_cust_gcc_corporation_detail_df																		
+    WHERE																		
+        dt = '20250728'																		
+        AND first_spend_date IS NOT NULL																		
+),																		
+imputation_values AS (																		
+    -- 这里是为了做数据填充（imputation）做准备。																		
+    -- 有些客户的数据可能不全，我们算一个全局的平均值，后面用来填补空缺。																		
+    SELECT																		
+        -- 计算所有客户的平均月充值次数，用于填充																		
+        AVG(month_avg_topup_cnt) AS avg_topup_cnt_for_imputation,																		
+        -- 计算所有客户的“消耗账户数/总开户数”的平均比率，用于填充																		
+        AVG(CASE																		
+                -- 筛选出合理的数据：总开户数>0 且 消耗账户数<=总开户数																		
+                WHEN COALESCE(total_applyopen_account_num, 0) > 0																		
+                    AND total_spend_account_num <= total_applyopen_account_num																		
+                THEN total_spend_account_num / total_applyopen_account_num																		
+                ELSE NULL																		
+            END) AS avg_ratio_for_imputation																		
+    FROM																		
+        base_clients_2																		
+),																		
+																		
+calculated_monthly_avgs_2 AS (																		
+    -- 计算月均的消耗账户数和消耗金额																		
+    SELECT																		
+        corporation_id,																		
+        month_avg_topup_amt,																		
+        month_avg_topup_cnt,																		
+        total_applyopen_account_num,																		
+        total_spend_account_num,																		
+        -- 月均消耗账户数																		
+        CASE																		
+            WHEN COALESCE(total_spend_months, 0) > 0 THEN COALESCE(total_spend_account_num,0) / total_spend_months																		
+            ELSE 0																		
+        END AS month_avg_spendaccount_num,																		
+        -- 月均消耗金额																		
+        CASE																		
+            WHEN COALESCE(total_spend_months, 0) > 0 THEN COALESCE(total_spend_amt,0) / total_spend_months																		
+            ELSE 0																		
+        END AS month_avg_spend_amt																		
+    FROM																		
+        base_clients_2																		
+),																		
+client_spend_partitioned_metric_1 as (																		
+SELECT																		
+    /*+ MAPJOIN(i) */ -- 用mapjoin优化一下，因为imputation_values这个表只有一行数据																		
+    a.corporation_id,																		
+																		
+    -- 月均充值金额，如果这个值是空的，就用月均消耗金额来代替，算是一种近似																		
+    CASE																		
+        WHEN a.month_avg_topup_amt IS NULL THEN a.month_avg_spend_amt																		
+        ELSE a.month_avg_topup_amt																		
+    END AS month_avg_topup_amt,																		
+																		
+    -- 月均充值次数，如果是空的，就用我们前面算的全局平均值来填充																		
+    COALESCE(a.month_avg_topup_cnt, i.avg_topup_cnt_for_imputation) AS month_avg_topup_cnt,																		
+																		
+    a.month_avg_spendaccount_num,																		
+																		
+    -- 计算“消耗账户占总开户数的比例”																		
+    CASE																		
+        -- 正常情况：总开户数>0 且 消耗账户数<=总开户数																		
+        WHEN COALESCE(a.total_applyopen_account_num, 0) > 0																		
+                AND a.total_spend_account_num <= a.total_applyopen_account_num																		
+        THEN a.total_spend_account_num / a.total_applyopen_account_num																		
+        -- 异常情况：消耗账户数 > 总开户数（数据有问题），用全局平均比率填充																		
+        WHEN COALESCE(a.total_applyopen_account_num, 0) > 0																		
+                AND a.total_spend_account_num > a.total_applyopen_account_num																		
+        THEN i.avg_ratio_for_imputation																		
+        -- 其他情况（比如总开户数为0），直接给0																		
+        ELSE 0																		
+    END AS spendacc2applyopen_ratio,																		
+																		
+    a.month_avg_spend_amt																		
+FROM																		
+    calculated_monthly_avgs_2 a																		
+LEFT JOIN																		
+    imputation_values i																		
+ON 1=1)																		
+,																		
+--*******************************end_line******************************-																		
+-- 这个模块主要是为了计算客户在不同时间窗口内的消耗分布																		
+base_clients_with_dates AS (																		
+    -- 准备基础数据，主要是客户ID和几个关键日期																		
+    SELECT																		
+        corporation_id,																		
+        first_30d_topup_amt,																		
+        TO_DATE(first_spend_date, 'yyyy-mm-dd') as first_spend_date,																		
+        TO_DATE(last_spend_date, 'yyyy-mm-dd') as last_spend_date																		
+    FROM																		
+        sino_dc_ads.ads_admkt_cust_gcc_corporation_detail_df																		
+    WHERE																		
+        dt = '20250728'																		
+        AND first_spend_date IS NOT NULL																		
+)																		
+,																		
+																		
+daily_spend_data AS (																		
+    -- 关联每日消耗表，拿到每个客户每一天的具体消耗金额																		
+    SELECT																		
+        a.corporation_id,																		
+        a.first_30d_topup_amt,																		
+        b.spend,																		
+        TO_DATE(b.spend_date_beijing, 'yyyy-mm-dd') as spend_date_beijing																		
+    FROM																		
+        base_clients_with_dates a																		
+    JOIN																		
+        sino_ex_gcc_dev.tmp_gcc_spend_20250728 b ON a.corporation_id = b.client_id																		
+)																		
+,																		
+																		
+datediff_spend AS (																		
+    -- 这一步是关键，计算每一笔消耗距离“首次消耗”和“末次消耗”分别有多少天																		
+    SELECT																		
+        a.corporation_id,																		
+        a.first_30d_topup_amt,																		
+        a.spend,																		
+        -- 这笔消耗距离首次消耗有多少天																		
+        DATEDIFF(a.spend_date_beijing, b.first_spend_date, 'dd') as days_from_first_spend,																		
+        -- 这笔消耗距离末次消耗有多少天																		
+        DATEDIFF(b.last_spend_date, a.spend_date_beijing, 'dd') as days_to_last_spend																		
+    FROM																		
+        daily_spend_data a																		
+    JOIN																		
+        base_clients_with_dates b ON a.corporation_id = b.corporation_id																		
+),																		
+																		
+client_spend_partitioned_metric_2 as (																		
+-- 基于上面计算的天数差异，把消耗金额分到不同的时间段里																		
+SELECT																		
+    corporation_id,																		
+    -- 首30日充值金额，如果这个字段是空的，我们就自己从消耗明细里算一个首30日的消耗总额来近似																		
+    CASE																		
+        WHEN MIN(first_30d_topup_amt) IS NULL																		
+        THEN SUM(CASE WHEN days_from_first_spend >= 0 AND days_from_first_spend < 30 THEN spend ELSE 0 END)																		
+        ELSE MIN(first_30d_topup_amt)																		
+    END AS first_30d_topup_amt,																		
+    -- --- 从首次消耗开始算 ---																		
+    SUM(CASE WHEN days_from_first_spend >= 0 AND days_from_first_spend < 7   THEN spend ELSE 0 END) AS first_7d_spend_usd,																		
+    SUM(CASE WHEN days_from_first_spend >= 7 AND days_from_first_spend < 30  THEN spend ELSE 0 END) AS d8_to_d30_spend_usd,																		
+    SUM(CASE WHEN days_from_first_spend >= 30 AND days_from_first_spend < 60 THEN spend ELSE 0 END) AS d31_to_d60_spend_usd,																		
+    SUM(CASE WHEN days_from_first_spend >= 60 AND days_from_first_spend < 90 THEN spend ELSE 0 END) AS d61_to_d90_spend_usd,																		
+    SUM(CASE WHEN days_from_first_spend >= 90                       THEN spend ELSE 0 END) AS d91_plus_spend_usd,																		
+																		
+    -- --- 从末次消耗倒着算 ---																		
+    SUM(CASE WHEN days_to_last_spend >= 0 AND days_to_last_spend < 7    THEN spend ELSE 0 END) AS last_7d_spend_usd,																		
+    SUM(CASE WHEN days_to_last_spend >= 7 AND days_to_last_spend < 30   THEN spend ELSE 0 END) AS last_d8_to_d30_spend_usd,																		
+    SUM(CASE WHEN days_to_last_spend >= 30 AND days_to_last_spend < 60  THEN spend ELSE 0 END) AS last_d31_to_d60_spend_usd,																		
+    SUM(CASE WHEN days_to_last_spend >= 60 AND days_to_last_spend < 90  THEN spend ELSE 0 END) AS last_d61_to_d90_spend_usd,																		
+    SUM(CASE WHEN days_to_last_spend >= 90                        THEN spend ELSE 0 END) AS last_d91_plus_spend_usd																		
+																		
+FROM																		
+    datediff_spend																		
+GROUP BY																		
+    corporation_id																		
+),																		
+--*******************************************end_line************************************--																		
+-- 这个模块计算一些关于消耗稳定性和价值集中度的指标																		
+base_clients_3 AS (																		
+    -- 准备基础数据，客户ID和账户总余额																		
+    SELECT																		
+        corporation_id,																		
+        sc_total_balance_amt																		
+    FROM																		
+        sino_dc_ads.ads_admkt_cust_gcc_corporation_detail_df																		
+    WHERE																		
+        dt = '20250728'																		
+        AND first_spend_date IS NOT NULL																		
+),																		
+																		
+monthly_spend AS (																		
+    -- 先把日消耗聚合到月维度																		
+    SELECT																		
+        a.corporation_id,																		
+        TO_CHAR(CAST(b.spend_date_beijing AS DATE), 'yyyy-mm') AS spend_month,																		
+        SUM(b.spend) AS monthly_spend_amt																		
+    FROM																		
+        base_clients_3 a																		
+    JOIN																		
+        sino_ex_gcc_dev.tmp_gcc_spend_20250728 b ON a.corporation_id = b.client_id																		
+    GROUP BY																		
+        a.corporation_id,																		
+        TO_CHAR(CAST(b.spend_date_beijing AS DATE), 'yyyy-mm')																		
+),																		
+																		
+monthly_spend_statistics AS (																		
+    -- 用窗口函数计算每个客户月度消耗的各项统计指标																		
+    SELECT DISTINCT -- DISTINCT很重要，因为窗口函数会对每一行都计算，我们需要每个客户只有一行结果																		
+        corporation_id,																		
+        AVG(monthly_spend_amt) OVER (PARTITION BY corporation_id) AS avg_monthly_spend, -- 月均消耗																		
+        STDDEV_SAMP(monthly_spend_amt) OVER (PARTITION BY corporation_id) AS stddev_monthly_spend, -- 月消耗标准差																		
+        SUM(monthly_spend_amt) OVER (PARTITION BY corporation_id) AS total_spend, -- 总消耗																		
+        COUNT(spend_month) OVER (PARTITION BY corporation_id) AS total_spend_months, -- 总消耗月数																		
+        MAX(monthly_spend_amt) OVER (PARTITION BY corporation_id) AS max_month_spend, -- 消耗最多的月份的金额																		
+        FIRST_VALUE(monthly_spend_amt) OVER (PARTITION BY corporation_id ORDER BY spend_month ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS first_month_spend, -- 首月消耗																		
+        FIRST_VALUE(monthly_spend_amt) OVER (PARTITION BY corporation_id ORDER BY spend_month DESC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS last_month_spend -- 末月消耗																		
+    FROM																		
+        monthly_spend																		
+),																		
+																		
+value_concentration_numerator AS (																		
+    -- 这个逻辑是为了计算“价值集中度指数”的分子部分																		
+    -- 意思是，一个客户花了多长时间（几个月）才达到了他总消耗的80%																		
+    SELECT																		
+        corporation_id,																		
+        MIN(months_ranked_chronologically) AS months_to_reach_80_pct_spend																		
+    FROM (																		
+        SELECT																		
+            a.corporation_id,																		
+            -- 按时间顺序给月份排名																		
+            ROW_NUMBER() OVER (PARTITION BY a.corporation_id ORDER BY spend_month ASC) AS months_ranked_chronologically,																		
+            -- 计算累计消耗																		
+            SUM(monthly_spend_amt) OVER (PARTITION BY a.corporation_id ORDER BY spend_month ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) as cumulative_spend,																		
+            total_spend																		
+        FROM																		
+            monthly_spend a																		
+        JOIN																		
+            monthly_spend_statistics b ON a.corporation_id = b.corporation_id																		
+    )																		
+    WHERE																		
+        -- 筛选出累计消耗第一次达到总消耗80%的那个月																		
+        cumulative_spend >= total_spend * 0.8																		
+    GROUP BY																		
+        corporation_id																		
+),																		
+client_spend_partitioned_metric_3 as (																		
+SELECT																		
+    a.corporation_id,																		
+    -- 峰值月消耗 / 首月消耗，看消耗增长的潜力																		
+    CASE																		
+        WHEN COALESCE(b.first_month_spend, 0) > 0 THEN COALESCE(b.max_month_spend,0) / b.first_month_spend																		
+        ELSE NULL																		
+    END AS max_month_spendBYfirst_month_spend,																		
+    -- 峰值月消耗 / 末月消耗，看近期消耗的波动																		
+    CASE																		
+        WHEN COALESCE(b.last_month_spend, 0) > 0 THEN COALESCE(b.max_month_spend,0) / b.last_month_spend																		
+        ELSE NULL																		
+    END AS max_month_spendBYlast_month_spend,																		
+    -- 月度消耗变异系数 = 标准差 / 平均值，衡量消耗稳定性																		
+    CASE																		
+        WHEN COALESCE(b.avg_monthly_spend, 0) > 0 THEN COALESCE(b.stddev_monthly_spend, 0) / b.avg_monthly_spend																		
+        ELSE NULL																		
+    END AS month_std2avg,																		
+    -- 价值集中度指数 = (达到80%消耗的月数) / (总消耗月数)。值越小，说明客户价值越集中在早期。																		
+    CASE																		
+        WHEN COALESCE(b.total_spend_months, 0) > 0 THEN COALESCE(c.months_to_reach_80_pct_spend,0) / b.total_spend_months																		
+        ELSE NULL																		
+    END AS value_concentration_index,																		
+    -- 财务健康度（跑道月份） = 账户总余额 / 末月消耗。表示按现在的消耗速度，余额还能撑几个月。																		
+    CASE																		
+        WHEN COALESCE(b.last_month_spend, 0) > 0 THEN a.sc_total_balance_amt / b.last_month_spend																		
+        -- 如果末月没消耗，但账户里有钱，可以认为是无限																		
+        WHEN a.sc_total_balance_amt > 0 THEN 'infinity'																		
+        ELSE 0																		
+    END AS financial_runway_months																		
+FROM																		
+    base_clients_3 a																		
+LEFT JOIN																		
+    monthly_spend_statistics b ON a.corporation_id = b.corporation_id																		
+LEFT JOIN																		
+    value_concentration_numerator c ON a.corporation_id = c.corporation_id),																		
+--****************************************end_line*************************************--																		
+-- 这个模块计算的是日维度的消耗波动和集中度指标，逻辑和月维度类似，但粒度更细																		
+base_clients_4 AS (																		
+    -- 准备数据																		
+    SELECT																		
+        corporation_id,																		
+        last_spend_date																		
+    FROM																		
+        sino_dc_ads.ads_admkt_cust_gcc_corporation_detail_df																		
+    WHERE																		
+        dt = '20250728'																		
+        AND first_spend_date IS NOT NULL																		
+),																		
+																		
+daily_spend AS (																		
+    -- 拿到有消耗的每一天的记录																		
+    SELECT																		
+        a.corporation_id,																		
+        TO_DATE(b.spend_date_beijing, 'yyyy-mm-dd') AS spend_date,																		
+        b.spend																		
+    FROM																		
+        base_clients_4 a																		
+    JOIN																		
+        sino_ex_gcc_dev.tmp_gcc_spend_20250728 b ON a.corporation_id = b.client_id																		
+    WHERE																		
+        b.spend > 0																		
+),																		
+																		
+monthly_spend_summary AS (																		
+    -- 先按月聚合一下，计算月总消耗和月活跃天数（有消耗的天数）																		
+    SELECT																		
+        corporation_id,																		
+        SUBSTR(CAST(spend_date AS STRING), 1, 7) AS spend_month,																		
+        SUM(spend) AS monthly_total_spend,																		
+        COUNT(DISTINCT spend_date) AS active_days_in_month																		
+    FROM																		
+        daily_spend																		
+    GROUP BY																		
+        corporation_id,																		
+        SUBSTR(CAST(spend_date AS STRING), 1, 7)																		
+),																		
+																		
+client_month_extremes AS (																		
+    -- 计算首月、末月、峰值月的“日均消耗”																		
+    SELECT DISTINCT																		
+        corporation_id,																		
+        -- 首月的日均消耗																		
+        FIRST_VALUE(monthly_total_spend / active_days_in_month) OVER (PARTITION BY corporation_id ORDER BY spend_month ASC) AS avg_daily_spend_first_month,																		
+        -- 末月的日均消耗																		
+        FIRST_VALUE(monthly_total_spend / active_days_in_month) OVER (PARTITION BY corporation_id ORDER BY spend_month DESC) AS avg_daily_spend_last_month,																		
+        -- 峰值月（月消耗最高）的日均消耗																		
+        FIRST_VALUE(monthly_total_spend / active_days_in_month) OVER (PARTITION BY corporation_id ORDER BY monthly_total_spend DESC, spend_month DESC) AS avg_daily_spend_max_month																		
+    FROM																		
+        monthly_spend_summary																		
+),																		
+																		
+daily_concentration_summary AS (																		
+    -- 计算日维度的价值集中度指数，逻辑和月维度的一样																		
+    SELECT																		
+        corporation_id,																		
+        CAST(numerator AS DOUBLE) / CAST(denominator AS DOUBLE) AS value_concentration_index_daily																		
+    FROM (																		
+        SELECT																		
+            corporation_id,																		
+            -- 分子：达到80%消耗的天数																		
+            MIN(CASE																		
+                WHEN cumulative_spend >= total_spend * 0.8 THEN chronological_day_rank																		
+                ELSE NULL																		
+            END) AS numerator,																		
+            -- 分母：总的有消耗的天数																		
+            MAX(chronological_day_rank) AS denominator																		
+        FROM (																		
+            SELECT																		
+                corporation_id,																		
+                spend_date,																		
+                spend,																		
+                SUM(spend) OVER (PARTITION BY corporation_id) AS total_spend,																		
+                SUM(spend) OVER (PARTITION BY corporation_id ORDER BY spend_date ASC) AS cumulative_spend,																		
+                ROW_NUMBER() OVER (PARTITION BY corporation_id ORDER BY spend_date ASC) AS chronological_day_rank																		
+            FROM																		
+                daily_spend																		
+        )																		
+        GROUP BY																		
+            corporation_id																		
+    )																		
+),																		
+																		
+client_spend_partitioned_metric_4 as (																		
+SELECT																		
+    a.corporation_id,																		
+    -- 峰值月日均消耗 / 首月日均消耗																		
+    CASE																		
+        WHEN COALESCE(b.avg_daily_spend_first_month, 0) > 0 THEN b.avg_daily_spend_max_month / b.avg_daily_spend_first_month																		
+        ELSE 0																		
+    END AS ratio_avg_daily_spend_max_to_first,																		
+    -- 峰值月日均消耗 / 末月日均消耗																		
+    CASE																		
+        WHEN COALESCE(b.avg_daily_spend_last_month, 0) > 0 THEN b.avg_daily_spend_max_month / b.avg_daily_spend_last_month																		
+        ELSE 999 -- 如果末月日均消耗是0，给一个特殊值999，方便后续筛选和识别																		
+    END AS ratio_avg_daily_spend_max_to_last,																		
+																		
+    c.value_concentration_index_daily,																		
+																		
+    -- 最近一次消耗距今多少天，用来判断客户是否流失																		
+    DATEDIFF(																		
+        TO_DATE('20250729', 'yyyymmdd'), -- 这里用脚本跑批日期的第二天来计算																		
+        TO_DATE(a.last_spend_date, 'yyyy-mm-dd'),																		
+        'dd'																		
+    ) AS days_since_last_spend																		
+																		
+FROM																		
+    base_clients_4 a																		
+LEFT JOIN																		
+    client_month_extremes b ON a.corporation_id = b.corporation_id																		
+LEFT JOIN																		
+    daily_concentration_summary c ON a.corporation_id = c.corporation_id)																		
+																		
+																		
+-- 最后一步：把前面计算出的所有中间结果（m1, m2, m3, m4, m5）全部拼接在一起，形成最终的大宽表。																		
+-- 每个m都代表了一类标签。																		
+																		
+SELECT																		
+    m1.corporation_id,																		
+    m1.corporation_name,																		
+    m1.total_account_count,																		
+    m1.month_avg_account_count,																		
+    m1.total_ad_count,																		
+    m1.month_avg_ad_count,																		
+    m1.total_campaign_count,																		
+    m1.month_avg_campaign_count,																		
+    m1.corporation_size,																		
+    m1.corporation_promotion_channel_second,																		
+    m1.business_background,																		
+    m1.ads_team_size,																		
+    m1.onboarding_intent_tier,																		
+    m2.month_avg_topup_amt,																		
+    m2.month_avg_topup_cnt,																		
+    m2.month_avg_spendaccount_num,																		
+    m2.spendacc2applyopen_ratio,																		
+    m2.month_avg_spend_amt,																		
+																		
+    m3.first_30d_topup_amt,																		
+    m3.first_7d_spend_usd,																		
+    m3.d8_to_d30_spend_usd,																		
+    m3.d31_to_d60_spend_usd,																		
+    m3.d61_to_d90_spend_usd,																		
+    m3.d91_plus_spend_usd,																		
+    m3.last_7d_spend_usd,																		
+    m3.last_d8_to_d30_spend_usd,																		
+    m3.last_d31_to_d60_spend_usd,																		
+    m3.last_d61_to_d90_spend_usd,																		
+    m3.last_d91_plus_spend_usd,																		
+																		
+    m4.max_month_spendBYfirst_month_spend,																		
+    m4.max_month_spendBYlast_month_spend,																		
+    m4.month_std2avg,																		
+    m4.value_concentration_index,																		
+    m4.financial_runway_months,																		
+    m5.ratio_avg_daily_spend_max_to_first,																		
+    m5.ratio_avg_daily_spend_max_to_last,																		
+    m5.value_concentration_index_daily,																		
+    m5.days_since_last_spend																		
+																		
+FROM																		
+    client_basic_info_full_metric m1																		
+LEFT JOIN																		
+    client_spend_partitioned_metric_1 m2 ON m1.corporation_id = m2.corporation_id																		
+LEFT JOIN																		
+    client_spend_partitioned_metric_2 m3 ON m1.corporation_id = m3.corporation_id																		
+LEFT JOIN																		
+    client_spend_partitioned_metric_3 m4 ON m1.corporation_id = m4.corporation_id																		
+LEFT JOIN																		
+    client_spend_partitioned_metric_4 m5 ON m1.corporation_id = m5.corporation_id;																		
+																		
+-- 用来做数据探查和验证的，验证ratio_avg_daily_spend_max_to_last这个字段有没有出现999我设定的代替无穷的数，结果是没有。																		
+SELECT count(*) FROM sino_dc_ads_dev.tmp_client_segmentation_raw_no_advertising_effect_20250807																		
+																		
+																		
+where ratio_avg_daily_spend_max_to_last = 999 or ratio_avg_daily_spend_max_to_first = 999;																		
+																		
+																		
+																		
+																		
+																		
+																		
+																		
+客户广告消耗属性信息																		
+-- ********************************************************************--																		
+-- author:杨宜树																		
+-- create time:2025-07-30 17:37:40																		
+-- ********************************************************************--																		
+DROP TABLE IF EXISTS sino_dc_ads_dev.tmp_client_segmentation_media_spending_digits_20250805;																		
+CREATE TABLE sino_dc_ads_dev.tmp_client_segmentation_media_spending_digits_20250805 LIFECYCLE 60 AS																		
+																		
+-- 这个脚本的目的是计算各个客户在不同媒体渠道上的花费占比																		
+WITH base_clients AS (																		
+    -- 第一步，还是老样子，先把我们要分析的客户群体圈出来。																		
+    -- 条件很简单：只要是花过钱的客户就行。																		
+    SELECT																		
+        corporation_id																		
+    FROM																		
+        sino_dc_ads.ads_admkt_cust_gcc_corporation_detail_df																		
+    WHERE																		
+        dt = '20250728'																		
+        AND first_spend_date IS NOT NULL																		
+),																		
+																		
+client_spend_summary AS (																		
+    -- 第二步，汇总每个客户在各个主要渠道上的总花费。																		
+    -- 我们把客户表和消耗明细表关联起来，然后按客户ID分组。																		
+    SELECT																		
+        a.corporation_id,																		
+        -- 总消耗																		
+        SUM(b.spend) AS total_spend,																		
+        -- 用CASE WHEN来分别计算在Facebook, TikTok, Google上的消耗																		
+        SUM(CASE WHEN b.channel_name = 'Facebook' THEN b.spend ELSE 0 END) AS fb_spend,																		
+        SUM(CASE WHEN b.channel_name = 'TikTok' THEN b.spend ELSE 0 END) AS tt_spend,																		
+        SUM(CASE WHEN b.channel_name = 'Google' THEN b.spend ELSE 0 END) AS gg_spend																		
+    FROM																		
+        base_clients a																		
+    JOIN																		
+        -- 关联消耗明细表																		
+        sino_ex_gcc_dev.tmp_gcc_spend_20250728 b ON a.corporation_id = b.client_id																		
+    GROUP BY																		
+        a.corporation_id																		
+)																		
+																		
+-- 最后一步，基于上面的汇总数据，计算各个渠道的消耗占比。																		
+SELECT																		
+    corporation_id,																		
+																		
+    -- Facebook消耗占比 = Facebook消耗 / 总消耗																		
+    CASE																		
+        WHEN COALESCE(total_spend, 0) > 0 THEN fb_spend / total_spend																		
+        ELSE 0																		
+    END AS fb_spend_by_full_spend_ratio,																		
+																		
+    -- TikTok消耗占比																		
+    CASE																		
+        WHEN COALESCE(total_spend, 0) > 0 THEN tt_spend / total_spend																		
+        ELSE 0																		
+    END AS tt_spend_by_full_spend_ratio,																		
+																		
+    -- Google消耗占比																		
+    CASE																		
+        WHEN COALESCE(total_spend, 0) > 0 THEN gg_spend / total_spend																		
+        ELSE 0																		
+    END AS gg_spend_by_full_spend_ratio,																		
+																		
+    -- 三大主流渠道的总消耗占比																		
+    CASE																		
+        WHEN COALESCE(total_spend, 0) > 0 THEN (fb_spend + tt_spend + gg_spend) / total_spend																		
+        ELSE 0																		
+    END AS fb_tt_gg_spend_by_full_spend_ratio																		
+																		
+FROM																		
+    client_spend_summary;																		
+																		
+-- 跑完数据后习惯性地查一下表，看看数据对不对。																		
+SELECT * FROM sino_dc_ads_dev.tmp_client_segmentation_media_spending_digits_20250805;																		
+																		
+																		
+																		
+客户投放属性信息（有两部分，第二部分是后续加上去的）																		
+-- ********************************************************************--																		
+-- author:杨宜树																		
+-- create time:2025-07-30 11:52:24																		
+-- ********************************************************************--																		
+-- 这个脚本主要是为了加工出客户在“投放内容”方面的一些标签，比如主投品类是什么。																		
+DROP TABLE IF EXISTS sino_dc_ads_dev.tmp_client_segmentation_delivery_digits_20250805;																		
+CREATE TABLE sino_dc_ads_dev.tmp_client_segmentation_delivery_digits_20250805 LIFECYCLE 60 AS																		
+-- 第一个大的模块，主要是分析客户主投的二级、三级，以及二三级组合品类。																		
+WITH base_clients AS (																		
+    -- 老规矩，先把我们要分析的客户ID圈出来，条件是必须有过消耗记录的。																		
+    SELECT																		
+        corporation_id																		
+    FROM																		
+        sino_dc_ads.ads_admkt_cust_gcc_corporation_detail_df																		
+    WHERE																		
+        dt = '20250728'																		
+        AND first_spend_date IS NOT NULL																		
+),																		
+																		
+unioned_ad_categories AS (																		
+    -- 把FB, TT, GG三个渠道的广告品类数据都合到一张临时表里，方便后面统一分析。																		
+    -- 这里只保留有消耗的记录，并且对品类名称做了清洗，把空值和'(Empty)'都统一成'未知'。																		
+    SELECT																		
+        corporation_id,																		
+        spend_usd,																		
+        CASE WHEN COALESCE(category_level2_name_ch, '') = '' OR category_level2_name_ch = '(Empty)' THEN '未知' ELSE category_level2_name_ch END AS category_l2,																		
+        CASE WHEN COALESCE(category_level3_name_ch, '') = '' OR category_level3_name_ch = '(Empty)' THEN '未知' ELSE category_level3_name_ch END AS category_l3																		
+    FROM (																		
+        SELECT corporation_id, spend_usd, category_level2_name_ch, category_level3_name_ch FROM sino_dc_ads.ads_admkt_adver_fb_country_ad_category_level_v3 WHERE dt BETWEEN '20231101' AND '20250728'																		
+        UNION ALL																		
+        SELECT corporation_id, spend_usd, category_level2_name_ch, category_level3_name_ch FROM sino_dc_ads.ads_admkt_adver_tt_country_ad_category_level_v3 WHERE dt BETWEEN '20231101' AND '20250728'																		
+        UNION ALL																		
+        SELECT corporation_id, spend_usd, category_level2_name_ch, category_level3_name_ch FROM sino_dc_ads.ads_admkt_adver_gg_country_ad_category_level_v3 WHERE dt BETWEEN '20231101' AND '20250728'																		
+    )																		
+    WHERE spend_usd > 0 AND corporation_id IN (SELECT corporation_id FROM base_clients)																		
+),																		
+																		
+top_l2_category AS (																		
+    -- 计算每个客户花钱最多的二级品类是哪个。																		
+    -- 用窗口函数ROW_NUMBER()按消耗降序排名，取第一名。																		
+    SELECT																		
+        corporation_id,																		
+        category_l2 AS top_l2_category_by_spend																		
+    FROM (																		
+        SELECT																		
+            corporation_id,																		
+            category_l2,																		
+            ROW_NUMBER() OVER (PARTITION BY corporation_id ORDER BY SUM(spend_usd) DESC) as rn																		
+        FROM unioned_ad_categories																		
+        GROUP BY corporation_id, category_l2																		
+    )																		
+    WHERE rn = 1																		
+),																		
+																		
+top_l3_category AS (																		
+    -- 同理，计算每个客户花钱最多的三级品类。																		
+    SELECT																		
+        corporation_id,																		
+        category_l3 AS top_l3_category_by_spend																		
+    FROM (																		
+        SELECT																		
+            corporation_id,																		
+            category_l3,																		
+            ROW_NUMBER() OVER (PARTITION BY corporation_id ORDER BY SUM(spend_usd) DESC) as rn																		
+        FROM unioned_ad_categories																		
+        GROUP BY corporation_id, category_l3																		
+    )																		
+    WHERE rn = 1																		
+),																		
+																		
+top_l2_l3_combined_category AS (																		
+    -- 这里我们把二三级品类拼成一个整体，再看哪个组合花的钱最多。																		
+    -- 这样能更精确地定位到客户的主力细分产品。																		
+    SELECT																		
+        corporation_id,																		
+        l2_l3_combined AS top_l2_l3_combined_by_spend																		
+    FROM (																		
+        SELECT																		
+            corporation_id,																		
+            l2_l3_combined,																		
+            ROW_NUMBER() OVER (PARTITION BY corporation_id ORDER BY SUM(spend_usd) DESC) as rn																		
+        FROM (																		
+            SELECT																		
+                corporation_id,																		
+                spend_usd,																		
+                -- 如果二级和三级都是未知，那组合起来也是未知																		
+                CASE																		
+                    WHEN category_l2 = '未知' AND category_l3 = '未知' THEN '未知'																		
+                    ELSE CONCAT_WS('_', category_l2, category_l3)																		
+                END as l2_l3_combined																		
+            FROM unioned_ad_categories																		
+        )																		
+        GROUP BY corporation_id, l2_l3_combined																		
+    )																		
+    WHERE rn = 1																		
+)																		
+-- 把上面算出来的各种主投品类标签汇总到一起。																		
+SELECT																		
+    b.corporation_id,																		
+																		
+    -- 主投二级品类，空值处理成'未知'																		
+    COALESCE(l2.top_l2_category_by_spend, '未知') AS top_l2_category,																		
+																		
+    -- 主投三级品类																		
+    COALESCE(l3.top_l3_category_by_spend, '未知') AS top_l3_category,																		
+																		
+    -- 这个字段是把上面分别算出来的主投二级和主投三级直接拼起来，作为对比。																		
+    CASE																		
+        WHEN COALESCE(l2.top_l2_category_by_spend, '未知') = '未知' AND COALESCE(l3.top_l3_category_by_spend, '未知') = '未知'																		
+        THEN '未知'																		
+        ELSE CONCAT_WS('_', COALESCE(l2.top_l2_category_by_spend, '未知'), COALESCE(l3.top_l3_category_by_spend, '未知'))																		
+    END AS top_l2_and_l3_concatenated,																		
+    -- 这个是前面直接按二三级组合计算出的主投品类。																		
+    COALESCE(l2l3.top_l2_l3_combined_by_spend, '未知') AS top_l2_l3_combined,																		
+																		
+    -- 加一个校验字段，看看上面两种方法算出来的结果是不是一致的。																		
+    -- 这有助于我们判断客户的投放是集中在单一品类，还是分散在不同二级品类的多个三级品类里。																		
+    CASE																		
+        WHEN COALESCE(l2.top_l2_category_by_spend, '未知') = '未知' OR COALESCE(l3.top_l3_category_by_spend, '未知') = '未知' THEN '无法比较' -- 如果有任何一部分是未知，就没法比了																		
+        WHEN																		
+            CONCAT_WS('_', COALESCE(l2.top_l2_category_by_spend, '未知'), COALESCE(l3.top_l3_category_by_spend, '未知')) = COALESCE(l2l3.top_l2_l3_combined_by_spend, '未知')																		
+        THEN '是'																		
+        ELSE '否'																		
+    END AS is_concatenated_equal_to_combined																		
+																		
+FROM																		
+    base_clients b																		
+LEFT JOIN																		
+    top_l2_category l2 ON b.corporation_id = l2.corporation_id																		
+LEFT JOIN																		
+    top_l3_category l3 ON b.corporation_id = l3.corporation_id																		
+LEFT JOIN																		
+    top_l2_l3_combined_category l2l3 ON b.corporation_id = l2l3.corporation_id;																		
+																		
+																		
+-- 下面这一部分是另一个独立的逻辑，计算的是另外几个投放维度的标签。																		
+-- 为了代码清晰，这里用了几个临时表来分步处理。																		
+																		
+-- 1. 准备品类消耗数据																		
+CREATE TABLE tmp_category_spend lifecycle 1 AS																		
+SELECT																		
+    corporation_id,																		
+    category_level2_name_ch,																		
+    category_level3_name_ch																		
+FROM (																		
+    SELECT corporation_id, category_level2_name_ch, category_level3_name_ch, spend_usd FROM sino_dc_ads.ads_admkt_adver_fb_country_ad_category_level_v3 WHERE dt BETWEEN '20231101' AND '20250728'																		
+    UNION ALL																		
+    SELECT corporation_id, category_level2_name_ch, category_level3_name_ch, spend_usd FROM sino_dc_ads.ads_admkt_adver_tt_country_ad_category_level_v3 WHERE dt BETWEEN '20231101' AND '20250728'																		
+    UNION ALL																		
+    SELECT corporation_id, category_level2_name_ch, category_level3_name_ch, spend_usd FROM sino_dc_ads.ads_admkt_adver_gg_country_ad_category_level_v3 WHERE dt BETWEEN '20231101' AND '20250728'																		
+) AS all_media_spend																		
+WHERE spend_usd > 0;																		
+																		
+																		
+-- 2. 计算投放的品类广度																		
+CREATE TABLE tmp_category_counts lifecycle 1 AS																		
+SELECT																		
+    corporation_id,																		
+    -- 计算每个客户总共投了多少个不同的二级品类																		
+    COUNT(DISTINCT category_level2_name_ch) AS consumed_level2_category_count,																		
+    -- 计算每个客户总共投了多少个不同的三级品类																		
+    COUNT(DISTINCT category_level3_name_ch) AS consumed_level3_category_count																		
+FROM																		
+    tmp_category_spend																		
+GROUP BY																		
+    corporation_id;																		
+																		
+-- 3. 准备渠道消耗数据																		
+CREATE TABLE tmp_channel_spend lifecycle 1 AS																		
+SELECT																		
+    corporation_id,																		
+    channel_name,																		
+    -- 按渠道消耗排名																		
+    ROW_NUMBER() OVER(PARTITION BY corporation_id ORDER BY total_spend DESC) as rn,																		
+    -- 计算总共投了几个渠道																		
+    COUNT(channel_name) OVER(PARTITION BY corporation_id) as channel_count																		
+FROM (																		
+    SELECT																		
+        client_id as corporation_id,																		
+        channel_name,																		
+        SUM(spend) as total_spend																		
+    FROM																		
+        sino_ex_gcc_dev.tmp_gcc_spend_20250728																		
+    GROUP BY																		
+        corporation_id,																		
+        channel_name																		
+) AS spend_by_channel;																		
+																		
+-- 4. 提取主投媒体和渠道数																		
+CREATE TABLE tmp_main_media_and_count lifecycle 1 AS																		
+SELECT																		
+    corporation_id,																		
+    -- 排名第一的就是主投媒体																		
+    channel_name AS main_media,																		
+    channel_count																		
+FROM																		
+    tmp_channel_spend																		
+WHERE																		
+    rn = 1;																		
+																		
+-- 5. 准备国家/地区消耗数据并排名																		
+CREATE table tmp_ranked_countries lifecycle 1 AS																		
+SELECT																		
+    corporation_id,																		
+    country_name_ch,																		
+    ROW_NUMBER() OVER(PARTITION BY corporation_id ORDER BY total_spend DESC) as rn																		
+FROM (																		
+    SELECT																		
+        corporation_id,																		
+        country_name_ch,																		
+        SUM(spend_usd) as total_spend																		
+    FROM																		
+        sino_dc_ads.ads_admkt_adver_pub_multi_channel_country_ad_di																		
+    WHERE																		
+        dt BETWEEN '20221231' AND '20250728'																		
+    GROUP BY																		
+        corporation_id,																		
+        country_name_ch																		
+) AS country_spend;																		
+																		
+-- 6. 提取主投区域																		
+CREATE TABLE tmp_main_regions lifecycle 1 AS																		
+SELECT																		
+    corporation_id,																		
+    -- 把消耗排名前7的国家用"_"拼起来，作为主投区域																		
+    WM_CONCAT('_', country_name_ch) AS main_regions																		
+FROM																		
+    tmp_ranked_countries																		
+WHERE																		
+    rn <= 7																		
+GROUP BY																		
+    corporation_id;																		
+																		
+																		
+-- 最后，把上面几个临时表的结果汇总起来，生成最终的投放信息标签表。																		
+CREATE TABLE sino_dc_ads_dev.tmp_client_segmentation_delivery_info_digits_20250805 LIFECYCLE 180 AS																		
+																		
+SELECT																		
+    a.corporation_id,																		
+    b.consumed_level2_category_count,																		
+    b.consumed_level3_category_count,																		
+    c.main_media,																		
+    c.channel_count,																		
+    d.main_regions																		
+FROM																		
+    sino_dc_ads.ads_admkt_cust_gcc_corporation_detail_df a																		
+LEFT JOIN																		
+    tmp_category_counts b ON a.corporation_id = b.corporation_id																		
+LEFT JOIN																		
+    tmp_main_media_and_count c ON a.corporation_id = c.corporation_id																		
+LEFT JOIN																		
+    tmp_main_regions d ON a.corporation_id = d.corporation_id																		
+WHERE																		
+    a.dt = '20250728';																		
+																		
+-- 跑完习惯性地查一下表，看看数据长啥样。																		
+select * from sino_dc_ads_dev.tmp_client_segmentation_delivery_info_digits_20250805;																		
+																		
+																		
+																		
+客户产品使用属性信息																		
+-- ********************************************************************--																		
+-- author:杨宜树																		
+-- create time:2025-08-05 18:20:21																		
+-- ********************************************************************--																		
+-- 这个脚本是用来计算客户对我们平台“产品功能使用”相关的标签。																		
+-- 比如客户平均每月用我们产品多少天，最喜欢用哪个功能等等。																		
+DROP TABLE IF EXISTS sino_dc_ads_dev.tmp_client_segmentation_feature_adoption_digits_20250805;																		
+CREATE TABLE sino_dc_ads_dev.tmp_client_segmentation_feature_adoption_digits_20250805 LIFECYCLE 60 AS																		
+WITH base_clients AS (																		
+    -- 步骤一：跟之前的脚本一样，先把我们的目标客户（有过消耗的）圈出来，这是我们分析的基础。																		
+    SELECT																		
+        corporation_id																		
+    FROM																		
+        sino_dc_ads.ads_admkt_cust_gcc_corporation_detail_df																		
+    WHERE																		
+        dt = '20250728'																		
+        AND first_spend_date IS NOT NULL																		
+),																		
+																		
+filtered_product_events AS (																		
+    -- 步骤二：从产品使用的原始事件表（埋点数据）里，筛选出我们目标客户的记录。																		
+    -- 同时，根据业务逻辑，把'GCCBD首充'和'GCC消耗'这两个事件过滤掉，因为它们是业务事件而不是产品功能使用事件。																		
+    SELECT																		
+        a.corporation_id,																		
+        b.month_date AS spend_month, -- 用事件发生的月份作为后续聚合的维度																		
+        b.calendar_date,																		
+        b.merge_event_name,																		
+        b.merge_event_category3_name,																		
+        b.merge_event_category4_name																		
+    FROM																		
+        base_clients a																		
+    JOIN																		
+        sino_dc_ads.ads_admkt_gcc_merge_classify_detail_user b ON a.corporation_id = b.corporation_id																		
+    WHERE																		
+        b.dt BETWEEN '20250506' AND '20250728'																		
+        -- 这里就是上面提到的关键业务逻辑过滤																		
+        AND b.merge_event_name NOT IN ('GCCBD首充', 'GCC消耗')																		
+),																		
+																		
+monthly_event_summary AS (																		
+    -- 步骤三：进行第一层聚合，把每个客户每个月的产品使用情况汇总一下。																		
+    SELECT																		
+        corporation_id,																		
+        spend_month,																		
+        COUNT(DISTINCT calendar_date) AS monthly_active_days, -- 这个月总共活跃了多少天																		
+        COUNT(merge_event_name) AS monthly_event_count, -- 这个月总共触发了多少个事件																		
+        COUNT(DISTINCT merge_event_category3_name) AS monthly_distinct_l3_count, -- 这个月使用了多少种L3功能																		
+        COUNT(DISTINCT merge_event_category4_name) AS monthly_distinct_l4_count  -- 这个月使用了多少种L4功能																		
+    FROM																		
+        filtered_product_events																		
+    GROUP BY																		
+        corporation_id,																		
+        spend_month																		
+),																		
+																		
+client_avg_monthly_metrics AS (																		
+    -- 步骤四：在月度汇总的基础上，计算最终我们想要的“月均”指标。																		
+    -- 这样可以更公平地比较不同生命周期长度的客户。																		
+    SELECT																		
+        corporation_id,																		
+        AVG(monthly_active_days) AS avg_monthly_active_days,																		
+        AVG(monthly_event_count) AS avg_monthly_event_count,																		
+        AVG(monthly_distinct_l3_count) AS avg_monthly_distinct_l3_count,																		
+        AVG(monthly_distinct_l4_count) AS avg_monthly_distinct_l4_count																		
+    FROM																		
+        monthly_event_summary																		
+    GROUP BY																		
+        corporation_id																		
+),																		
+																		
+top_categories AS (																		
+    -- 步骤五：找出每个客户最常使用的L3和L4功能是啥。																		
+    -- 这里的逻辑是按事件触发次数倒序排名，取第一名。																		
+    SELECT																		
+        corporation_id,																		
+        MAX(CASE WHEN rn_l3 = 1 THEN merge_event_category3_name ELSE NULL END) AS top_l3_category_feature,																		
+        MAX(CASE WHEN rn_l4 = 1 THEN merge_event_category4_name ELSE NULL END) AS top_l4_category_feature																		
+    FROM (																		
+        SELECT																		
+            corporation_id,																		
+            merge_event_category3_name,																		
+            merge_event_category4_name,																		
+            -- 按L3功能的使用次数排名																		
+            ROW_NUMBER() OVER (PARTITION BY corporation_id ORDER BY COUNT(*) DESC) as rn_l3,																		
+            -- 按L4功能的使用次数排名																		
+            ROW_NUMBER() OVER (PARTITION BY corporation_id ORDER BY COUNT(*) DESC) as rn_l4																		
+        FROM filtered_product_events																		
+        WHERE merge_event_category3_name IS NOT NULL -- 过滤掉没有L3功能的事件																		
+        GROUP BY corporation_id, merge_event_category3_name, merge_event_category4_name																		
+    )																		
+    GROUP BY corporation_id																		
+),																		
+																		
+core_feature_adoption AS (																		
+    -- 步骤六：判断客户是否使用了我们定义的一些“核心功能”。																		
+    -- 这个主要是为了看客户有没有深入使用我们平台，而不只是停留在浅层。																		
+    SELECT																		
+        corporation_id,																		
+        MAX(CASE																		
+            -- 这里定义了哪些是核心功能																		
+            WHEN merge_event_category3_name IN ('资产安全', '政策合规', '创意素材')																		
+                OR merge_event_category4_name IN ('网站诊断', '效果分析', '广告创编', '广告管理和分析', '投放报告', '提交开户', '充值成功')																		
+                OR merge_event_name = '账户申诉'																		
+            THEN 1 -- 只要用过任意一个，就标记为1																		
+            ELSE 0																		
+            END) AS core_feature_adoption_flag																		
+    FROM																		
+        filtered_product_events																		
+    GROUP BY																		
+        corporation_id																		
+)																		
+																		
+-- 最后一步：把上面千辛万苦算出来的各种指标，都关联回我们的基础客户表里。																		
+SELECT																		
+    b.corporation_id,																		
+    -- 对于那些一次产品功能都没用过的客户（在事件表里没记录），他们的指标会是NULL，这里用COALESCE把NULL都处理成0。																		
+    COALESCE(cam.avg_monthly_active_days, 0) AS avg_monthly_active_days,																		
+    COALESCE(cam.avg_monthly_event_count, 0) AS avg_monthly_event_count,																		
+    COALESCE(cam.avg_monthly_distinct_l3_count, 0) AS avg_monthly_distinct_l3_count,																		
+    COALESCE(cam.avg_monthly_distinct_l4_count, 0) AS avg_monthly_distinct_l4_count,																		
+    tc.top_l3_category_feature, -- 最常使用的功能，如果没有使用记录就是NULL																		
+    tc.top_l4_category_feature, -- 同上																		
+    COALESCE(cfa.core_feature_adoption_flag, 0) AS core_feature_adoption_flag																		
+FROM																		
+    base_clients b																		
+LEFT JOIN																		
+    client_avg_monthly_metrics cam ON b.corporation_id = cam.corporation_id																		
+LEFT JOIN																		
+    top_categories tc ON b.corporation_id = tc.corporation_id																		
+LEFT JOIN																		
+    core_feature_adoption cfa ON b.corporation_id = cfa.corporation_id;																		
+																		
+																		
+																		
+																		
+客户国家维度属性信息																		
+-- ********************************************************************--																		
+-- author:杨宜树																		
+-- create time:2025-08-06 14:41:52																		
+-- ********************************************************************--																		
+-- 这个脚本主要是为了加工客户在“投放地区”维度上的一些标签。																		
+-- 比如客户月均投放多少个国家，主投区域是哪里，以及在主投区域的消耗集中度等。																		
+-- 为了让逻辑更清晰，我用了几个临时表来分步计算。																		
+																		
+-- 第一步：创建地理位置消耗的基础宽表																		
+DROP TABLE IF EXISTS sino_dc_ads_dev.tmp_geo_spend_base_20250805;																		
+CREATE TABLE sino_dc_ads_dev.tmp_geo_spend_base_20250805 LIFECYCLE 1 AS																		
+SELECT																		
+    /*+ MAPJOIN(a) */ -- 客户主表不大，这里用MAPJOIN优化一下性能																		
+    a.corporation_id,																		
+    b.channel_id,																		
+    b.spend_usd,																		
+    b.country_name_ch,																		
+    b.continents_name_ch,																		
+    b.custom_region,																		
+    b.year_month AS spend_month																		
+FROM																		
+    (																		
+        -- 先把我们的目标客户（有过消耗的）圈出来																		
+        SELECT corporation_id																		
+        FROM sino_dc_ads.ads_admkt_cust_gcc_corporation_detail_df																		
+        WHERE dt = '20250728' AND first_spend_date IS NOT NULL																		
+    ) a																		
+JOIN																		
+    -- 关联跨渠道的国家维度广告消耗数据																		
+    sino_dc_ads.ads_admkt_adver_pub_multi_channel_country_ad_di b																		
+ON																		
+    a.corporation_id = b.corporation_id																		
+WHERE																		
+    b.dt BETWEEN '20221231' AND '20250728'																		
+    AND b.spend_usd > 0; -- 只保留有消耗的记录																		
+																		
+-- 第二步：计算月均投放地域广度相关的指标																		
+DROP TABLE IF EXISTS sino_dc_ads_dev.tmp_monthly_avg_metrics_20250805;																		
+CREATE TABLE sino_dc_ads_dev.tmp_monthly_avg_metrics_20250805 LIFECYCLE 1 AS																		
+WITH distinct_counts AS (																		
+    -- 先计算每个客户总共投放了多少个不同的月份、国家、大洲和自定义区域																		
+    SELECT																		
+        corporation_id,																		
+        COUNT(DISTINCT spend_month) AS distinct_month_count,																		
+        COUNT(DISTINCT country_name_ch) AS distinct_country_count,																		
+        COUNT(DISTINCT continents_name_ch) AS distinct_continent_count,																		
+        COUNT(DISTINCT custom_region) AS distinct_region_count																		
+    FROM																		
+        sino_dc_ads_dev.tmp_geo_spend_base_20250805																		
+    GROUP BY																		
+        corporation_id																		
+)																		
+-- 然后用总的地域数除以总的月份数，得到“月均”指标，这样能更公平地比较																		
+SELECT																		
+    corporation_id,																		
+    -- 月均投放国家数																		
+    CASE																		
+        WHEN distinct_month_count > 0 THEN CAST(distinct_country_count AS DOUBLE) / distinct_month_count																		
+        ELSE NULL																		
+    END AS month_avg_country_count,																		
+    -- 月均投放大洲数																		
+    CASE																		
+        WHEN distinct_month_count > 0 THEN CAST(distinct_continent_count AS DOUBLE) / distinct_month_count																		
+        ELSE NULL																		
+    END AS month_avg_continent_count,																		
+    -- 月均投放自定义区域数																		
+    CASE																		
+        WHEN distinct_month_count > 0 THEN CAST(distinct_region_count AS DOUBLE) / distinct_month_count																		
+        ELSE NULL																		
+    END AS month_avg_custom_region_count																		
+FROM																		
+    distinct_counts;																		
+																		
+																		
+-- 第三步：计算主投区域和消耗集中度																		
+DROP TABLE IF EXISTS sino_dc_ads_dev.tmp_top_region_metrics_20250805;																		
+CREATE TABLE sino_dc_ads_dev.tmp_top_region_metrics_20250805 LIFECYCLE 1 AS																		
+WITH custom_region_spend_summary AS (																		
+    -- 按客户和自定义区域分组，汇总总消耗以及在FB/TT/GG三个渠道上的消耗																		
+    SELECT																		
+        corporation_id,																		
+        custom_region,																		
+        SUM(spend_usd) AS total_region_spend,																		
+        SUM(CASE WHEN channel_id = 1  THEN spend_usd ELSE 0 END) AS fb_region_spend,																		
+        SUM(CASE WHEN channel_id = 18 THEN spend_usd ELSE 0 END) AS tt_region_spend,																		
+        SUM(CASE WHEN channel_id = 3  THEN spend_usd ELSE 0 END) AS gg_region_spend																		
+    FROM																		
+        sino_dc_ads_dev.tmp_geo_spend_base_20250805																		
+    WHERE																		
+        custom_region IS NOT NULL -- 只分析有自定义区域的记录																		
+    GROUP BY																		
+        corporation_id,																		
+        custom_region																		
+),																		
+top_custom_regions_with_spend AS (																		
+    -- 使用窗口函数，找出每个客户在不同维度下花钱最多的那个区域																		
+    SELECT DISTINCT -- 每个客户只保留一行																		
+        corporation_id,																		
+        -- 全渠道主投区域																		
+        FIRST_VALUE(custom_region) OVER (PARTITION BY corporation_id ORDER BY total_region_spend DESC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS top_custom_region_all,																		
+        -- FB渠道主投区域																		
+        FIRST_VALUE(custom_region) OVER (PARTITION BY corporation_id ORDER BY fb_region_spend DESC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS top_custom_region_fb,																		
+        -- TT渠道主投区域																		
+        FIRST_VALUE(custom_region) OVER (PARTITION BY corporation_id ORDER BY tt_region_spend DESC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS top_custom_region_tt,																		
+        -- GG渠道主投区域																		
+        FIRST_VALUE(custom_region) OVER (PARTITION BY corporation_id ORDER BY gg_region_spend DESC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS top_custom_region_gg,																		
+        -- 主投区域的总消耗																		
+        MAX(total_region_spend) OVER (PARTITION BY corporation_id) AS top_region_total_spend,																		
+        -- 所有区域的总消耗																		
+        SUM(total_region_spend) OVER (PARTITION BY corporation_id) AS all_region_total_spend																		
+    FROM																		
+        custom_region_spend_summary																		
+)																		
+-- 计算主投区域的消耗占比，也就是集中度																		
+SELECT																		
+    corporation_id,																		
+    top_custom_region_all,																		
+    top_custom_region_fb,																		
+    top_custom_region_tt,																		
+    top_custom_region_gg,																		
+    -- 主投区域消耗占比 = 主投区域消耗 / 所有区域总消耗																		
+    CASE																		
+        WHEN COALESCE(all_region_total_spend, 0) > 0 THEN top_region_total_spend / all_region_total_spend																		
+        ELSE NULL																		
+    END AS top_custom_region_spend_ratio																		
+FROM																		
+    top_custom_regions_with_spend;																		
+																		
+																		
+-- 第四步：汇总所有计算好的标签，生成最终结果表																		
+DROP TABLE IF EXISTS sino_dc_ads_dev.tmp_client_segmentation_country_dimension_digits_20250805;																		
+CREATE TABLE sino_dc_ads_dev.tmp_client_segmentation_country_dimension_digits_20250805 LIFECYCLE 60 AS																		
+SELECT																		
+    a.corporation_id,																		
+    b.month_avg_country_count,																		
+    b.month_avg_continent_count,																		
+    b.month_avg_custom_region_count,																		
+    c.top_custom_region_all,																		
+    c.top_custom_region_fb,																		
+    c.top_custom_region_tt,																		
+    c.top_custom_region_gg,																		
+    c.top_custom_region_spend_ratio																		
+FROM																		
+    (																		
+        -- 还是以我们的基础客户为准																		
+        SELECT corporation_id																		
+        FROM sino_dc_ads.ads_admkt_cust_gcc_corporation_detail_df																		
+        WHERE dt = '20250728' AND first_spend_date IS NOT NULL																		
+    ) a																		
+LEFT JOIN																		
+    -- 关联月均指标表																		
+    sino_dc_ads_dev.tmp_monthly_avg_metrics_20250805 b ON a.corporation_id = b.corporation_id																		
+LEFT JOIN																		
+    -- 关联主投区域指标表																		
+    sino_dc_ads_dev.tmp_top_region_metrics_20250805 c ON a.corporation_id = c.corporation_id;																		
+																		
+-- 最后一步：删掉我们用过的临时表，保持环境整洁，是个好习惯																		
+DROP TABLE IF EXISTS sino_dc_ads_dev.tmp_geo_spend_base_20250805;																		
+DROP TABLE IF EXISTS sino_dc_ads_dev.tmp_monthly_avg_metrics_20250805;																		
+DROP TABLE IF EXISTS sino_dc_ads_dev.tmp_top_region_metrics_20250805;																		
+																		
+-- 跑完检查一下数据																		
+select * from sino_dc_ads_dev.tmp_client_segmentation_country_dimension_digits_20250805;																		
+																		
+-- ********************************************************************--																		
+-- author:杨宜树																		
+-- create time:2025-08-07 11:55:29																		
+-- ********************************************************************--																		
+-- =======================================================================================																		
+-- 步骤一：圈定需要打标的客户主体范围																		
+-- 逻辑：获取所有有过消耗记录的客户ID。																		
+-- =======================================================================================																		
+DROP TABLE IF EXISTS sino_dc_ads_dev.tmp_core_clients_20250810;																		
+CREATE TABLE sino_dc_ads_dev.tmp_core_clients_20250810 LIFECYCLE 1 AS																		
+SELECT																		
+    corporation_id																		
+FROM																		
+    sino_dc_ads.ads_admkt_cust_gcc_corporation_detail_df																		
+WHERE																		
+    dt = '20250728'																		
+    AND first_spend_date IS NOT NULL;																		
+																		
+-- =======================================================================================																		
+-- 步骤二：整合所有渠道的品类消耗数据																		
+-- 逻辑：将FB, TT, GG三个渠道的二级品类消耗数据合并，并清洗品类名称。																		
+-- =======================================================================================																		
+DROP TABLE IF EXISTS sino_dc_ads_dev.tmp_all_category_spend_20250810;																		
+CREATE TABLE sino_dc_ads_dev.tmp_all_category_spend_20250810 LIFECYCLE 1 AS																		
+SELECT																		
+    corporation_id,																		
+    CASE																		
+        WHEN coalesce(category_level2_name_ch, '') = '' OR lower(category_level2_name_ch) = '(empty)' THEN '未知'																		
+        ELSE category_level2_name_ch																		
+    END AS category_level2_name_ch																		
+FROM																		
+    (																		
+        SELECT corporation_id, category_level2_name_ch, spend_usd FROM sino_dc_ads.ads_admkt_adver_fb_country_ad_category_level_v3 WHERE dt BETWEEN '20231101' AND '20250728'																		
+        UNION ALL																		
+        SELECT corporation_id, category_level2_name_ch, spend_usd FROM sino_dc_ads.ads_admkt_adver_tt_country_ad_category_level_v3 WHERE dt BETWEEN '20231101' AND '20250728'																		
+        UNION ALL																		
+        SELECT corporation_id, category_level2_name_ch, spend_usd FROM sino_dc_ads.ads_admkt_adver_gg_country_ad_category_level_v3 WHERE dt BETWEEN '20231101' AND '20250728'																		
+    ) a																		
+WHERE																		
+    spend_usd > 0;																		
+																		
+-- =======================================================================================																		
+-- 步骤三：计算每个客户在各个核心品类的标志位																		
+-- 逻辑：【核心修改】对上一步的品类数据进行分组聚合，为每个客户生成四个独立的1/0标志位。																		
+-- =======================================================================================																		
+DROP TABLE IF EXISTS sino_dc_ads_dev.tmp_client_each_category_flag_20250810;																		
+CREATE TABLE sino_dc_ads_dev.tmp_client_each_category_flag_20250810 LIFECYCLE 1 AS																		
+SELECT																		
+    corporation_id,																		
+    -- 使用MAX(CASE WHEN...)，如果客户在该品类有消耗记录，MAX结果为1，否则为0																		
+    MAX(CASE WHEN category_level2_name_ch = '服装' THEN 1 ELSE 0 END) AS is_core_category_clothing,																		
+    MAX(CASE WHEN category_level2_name_ch = '饰品/配饰' THEN 1 ELSE 0 END) AS is_core_category_accessories,																		
+    MAX(CASE WHEN category_level2_name_ch = '美妆个护' THEN 1 ELSE 0 END) AS is_core_category_beauty,																		
+    MAX(CASE WHEN category_level2_name_ch = '消费电子' THEN 1 ELSE 0 END) AS is_core_category_electronics																		
+FROM																		
+    sino_dc_ads_dev.tmp_all_category_spend_20250810																		
+WHERE																		
+    -- 仅对核心品类进行计算，提高效率																		
+    category_level2_name_ch IN ('服装', '饰品/配饰', '美妆个护', '消费电子')																		
+GROUP BY																		
+    corporation_id;																		
+																		
+-- =======================================================================================																		
+-- 步骤四：生成最终的五个标签字段																		
+-- 逻辑：将主客群与上一步的品类标签表进行左连接，并计算涉及的核心品类总数。																		
+-- =======================================================================================																		
+DROP TABLE IF EXISTS sino_dc_ads_dev.tmp_client_label_core_category_flag_20250806;																		
+CREATE TABLE sino_dc_ads_dev.tmp_client_label_core_category_flag_20250806 LIFECYCLE 60 AS																		
+SELECT																		
+    a.corporation_id,																		
+    -- 如果客户不在品类标签表中，说明其未涉及任何核心品类，用COALESCE将NULL转为0																		
+    COALESCE(b.is_core_category_clothing, 0) AS is_core_category_clothing,																		
+    COALESCE(b.is_core_category_accessories, 0) AS is_core_category_accessories,																		
+    COALESCE(b.is_core_category_beauty, 0) AS is_core_category_beauty,																		
+    COALESCE(b.is_core_category_electronics, 0) AS is_core_category_electronics,																		
+    -- 将四个标志位相加，即为客户涉及的核心品类总数																		
+    (																		
+        COALESCE(b.is_core_category_clothing, 0) +																		
+        COALESCE(b.is_core_category_accessories, 0) +																		
+        COALESCE(b.is_core_category_beauty, 0) +																		
+        COALESCE(b.is_core_category_electronics, 0)																		
+    ) AS core_category_count																		
+FROM																		
+    sino_dc_ads_dev.tmp_core_clients_20250810 a																		
+LEFT JOIN																		
+    sino_dc_ads_dev.tmp_client_each_category_flag_20250810 b ON a.corporation_id = b.corporation_id;																		
+SELECT * FROM sino_dc_ads_dev.tmp_client_label_core_category_flag_20250806;																		
+																		
+-- =======================================================================================																		
+-- 步骤一：圈定需要打标的客户主体范围																		
+-- 逻辑：获取所有有过消耗记录的客户ID，作为我们的主表。																		
+-- =======================================================================================																		
+DROP TABLE IF EXISTS sino_dc_ads_dev.tmp_master_clients_for_risk_20250811;																		
+CREATE TABLE sino_dc_ads_dev.tmp_master_clients_for_risk_20250811 LIFECYCLE 1 AS																		
+SELECT																		
+    corporation_id																		
+FROM																		
+    sino_dc_ads.ads_admkt_cust_gcc_corporation_detail_df																		
+WHERE																		
+    dt = '20250728'																		
+    AND first_spend_date IS NOT NULL;																		
+																		
+																		
+-- =======================================================================================																		
+-- 步骤二：计算三种具体的违规类型风险标志																		
+-- 逻辑：【核心优化】一次性扫描客户详情表，同时为每个客户生成三种违规类型的1/0标志位。																		
+-- =======================================================================================																		
+DROP TABLE IF EXISTS sino_dc_ads_dev.tmp_violation_flags_20250811;																		
+CREATE TABLE sino_dc_ads_dev.tmp_violation_flags_20250811 LIFECYCLE 1 AS																		
+SELECT																		
+    corporation_id,																		
+    MAX(CASE WHEN violation_type_sets LIKE '%real_money%' THEN 1 ELSE 0 END) AS has_high_risk_flag_real_money,																		
+    MAX(CASE WHEN violation_type_sets LIKE '%假货%' THEN 1 ELSE 0 END) AS has_high_risk_flag_counterfeit,																		
+    MAX(CASE WHEN violation_type_sets LIKE '%欺骗%' THEN 1 ELSE 0 END) AS has_high_risk_flag_cheat																		
+FROM																		
+    sino_dc_ads.ads_admkt_cust_gcc_corporation_detail_df																		
+WHERE																		
+    dt = '20250728'																		
+GROUP BY																		
+    corporation_id;																		
+																		
+																		
+-- =======================================================================================																		
+-- 步骤三：识别所有涉及“博彩”品类的客户																		
+-- 逻辑：合并所有渠道的品类消耗数据，筛选出所有投过“博彩”品类的客户。																		
+-- =======================================================================================																		
+DROP TABLE IF EXISTS sino_dc_ads_dev.tmp_gambling_clients_20250811;																		
+CREATE TABLE sino_dc_ads_dev.tmp_gambling_clients_20250811 LIFECYCLE 1 AS																		
+SELECT DISTINCT																		
+    corporation_id																		
+FROM (																		
+    SELECT corporation_id, category_level2_name_ch, spend_usd FROM sino_dc_ads.ads_admkt_adver_fb_country_ad_category_level_v3 WHERE dt BETWEEN '20231101' AND '20250728'																		
+    UNION ALL																		
+    SELECT corporation_id, category_level2_name_ch, spend_usd FROM sino_dc_ads.ads_admkt_adver_tt_country_ad_category_level_v3 WHERE dt BETWEEN '20231101' AND '20250728'																		
+    UNION ALL																		
+    SELECT corporation_id, category_level2_name_ch, spend_usd FROM sino_dc_ads.ads_admkt_adver_gg_country_ad_category_level_v3 WHERE dt BETWEEN '20231101' AND '20250728'																		
+) all_channels_spend																		
+WHERE																		
+    spend_usd > 0																		
+    AND category_level2_name_ch = '博彩';																		
+																		
+																		
+-- =======================================================================================																		
+-- 步骤四：生成最终的四个高风险标签字段																		
+-- 逻辑：将主客群分别与违规标签表和博彩标签表进行左连接，生成最终的四个独立标志位。																		
+-- =======================================================================================																		
+DROP TABLE IF EXISTS sino_dc_ads_dev.tmp_client_label_high_risk_flag_20250807;																		
+CREATE TABLE sino_dc_ads_dev.tmp_client_label_high_risk_flag_20250807 LIFECYCLE 60 AS																		
+SELECT																		
+    a.corporation_id,																		
+    COALESCE(b.has_high_risk_flag_real_money, 0) AS has_high_risk_flag_real_money,																		
+    COALESCE(b.has_high_risk_flag_counterfeit, 0) AS has_high_risk_flag_counterfeit,																		
+    COALESCE(b.has_high_risk_flag_cheat, 0) AS has_high_risk_flag_cheat,																		
+    CASE																		
+        WHEN c.corporation_id IS NOT NULL THEN 1																		
+        ELSE 0																		
+    END AS has_high_risk_flag_gambling																		
+FROM																		
+    sino_dc_ads_dev.tmp_master_clients_for_risk_20250811 a																		
+LEFT JOIN																		
+    sino_dc_ads_dev.tmp_violation_flags_20250811 b ON a.corporation_id = b.corporation_id																		
+LEFT JOIN																		
+    sino_dc_ads_dev.tmp_gambling_clients_20250811 c ON a.corporation_id = c.corporation_id;																		
+																		
+-- =======================================================================================																		
+-- 可以通过执行以下语句来预览最终结果																		
+SELECT * FROM sino_dc_ads_dev.tmp_client_label_high_risk_flag_20250807 LIMIT 100;																		
+-- =======================================================================================																		
+																		
+																		
+																		
+																		
+																		
+																		
+																		
+																		
+																		
+																		
+																		
+																		
+																		
+																		
+最终聚合表：注意，不含广告成效字段，一共76个字段.																		
+-- 没有筛选这个条件：筛选(first_open_date >= '2023-07-01')  或 （first_open_date<  '2023-07-01', 且最后一次mb消耗日期 >= "2025-01-01") ，原始数据。																		
+DROP TABLE IF EXISTS sino_dc_ads_dev.tmp_client_segmentation_raw_no_advertising_effect_20250807;																		
+CREATE TABLE sino_dc_ads_dev.tmp_client_segmentation_raw_no_advertising_effect_20250807 LIFECYCLE 180 AS																		
+select 																		
+t1.*,																		
+t2.fb_spend_by_full_spend_ratio,																		
+t2.tt_spend_by_full_spend_ratio,																		
+t2.gg_spend_by_full_spend_ratio,																		
+t2.fb_tt_gg_spend_by_full_spend_ratio,																		
+t3.top_l2_category,																		
+t3.top_l3_category,																		
+t3.top_l2_and_l3_concatenated,																		
+t3.top_l2_l3_combined,																		
+t3.is_concatenated_equal_to_combined,																		
+t4.avg_monthly_active_days,																		
+t4.avg_monthly_event_count,																		
+t4.avg_monthly_distinct_l3_count,																		
+t4.avg_monthly_distinct_l4_count,																		
+t4.top_l3_category_feature,																		
+t4.top_l4_category_feature,																		
+t4.core_feature_adoption_flag,																		
+t5.month_avg_country_count,																		
+t5.month_avg_continent_count,																		
+t5.month_avg_custom_region_count,																		
+t5.top_custom_region_all,																		
+t5.top_custom_region_fb,																		
+t5.top_custom_region_tt,																		
+t5.top_custom_region_gg,																		
+t5.top_custom_region_spend_ratio,																		
+t6.is_core_category_clothing,																		
+t6.is_core_category_accessories,																		
+t6.is_core_category_beauty,																		
+t6.is_core_category_electronics,																		
+t6.core_category_count,																		
+t7.has_high_risk_flag_real_money,																		
+t7.has_high_risk_flag_counterfeit,																		
+t7.has_high_risk_flag_cheat,																		
+t7.has_high_risk_flag_gambling,																		
+t8.consumed_level2_category_count,t8.consumed_level3_category_count,																		
+t8.main_media,t8.channel_count,t8.main_regions																		
+FROM																		
+    sino_dc_ads_dev.tmp_client_segmentation_basic_info_spending_digits_20250805 t1																		
+LEFT JOIN																		
+    sino_dc_ads_dev.tmp_client_segmentation_media_spending_digits_20250805 t2 ON t1.corporation_id = t2.corporation_id																		
+LEFT JOIN																		
+    sino_dc_ads_dev.tmp_client_segmentation_delivery_digits_20250805 t3 ON t1.corporation_id = t3.corporation_id																		
+LEFT JOIN																		
+    sino_dc_ads_dev.tmp_client_segmentation_feature_adoption_digits_20250805 t4 ON t1.corporation_id = t4.corporation_id																		
+LEFT JOIN																		
+    sino_dc_ads_dev.tmp_client_segmentation_country_dimension_digits_20250805 t5 ON t1.corporation_id = t5.corporation_id																		
+LEFT JOIN																		
+    sino_dc_ads_dev.tmp_client_label_core_category_flag_20250806 t6 ON t1.corporation_id = t6.corporation_id																		
+LEFT JOIN																		
+    sino_dc_ads_dev.tmp_client_label_high_risk_flag_20250807 t7 ON t1.corporation_id = t7.corporation_id																		
+LEFT JOIN																		
+    sino_dc_ads_dev.tmp_client_segmentation_delivery_info_digits_20250805 t8 ON t1.corporation_id = t8.corporation_id;																		
+select * from sino_dc_ads_dev.tmp_client_segmentation_raw_no_advertising_effect_20250807;																		
+																		
+-- 筛选这个条件：筛选(first_open_date >= '2023-07-01')  或 （first_open_date<  '2023-07-01', 且最后一次mb消耗日期 >= "2025-01-01") ，原始数据。																		
+																		
+DROP TABLE IF EXISTS sino_dc_ads_dev.tmp_client_segmentation_raw_no_advertising_effect_20250807_opendateMB;																		
+CREATE TABLE sino_dc_ads_dev.tmp_client_segmentation_raw_no_advertising_effect_20250807_opendateMB LIFECYCLE 1 AS																		
+select * from sino_dc_ads_dev.tmp_client_segmentation_raw_no_advertising_effect_20250807																		
+where corporation_id in (																		
+    select b.corporation_id from sino_dc_ads.ads_admkt_cust_gcc_corporation_detail_df b																		
+    where b.dt = '20250728'																		
+    and (b.first_open_date >= '2023-07-01' or (b.first_open_date < '2023-07-01' and b.last_spend_date >= '2025-01-01'))																		
+);																		
+																		
+																		
+DROP TABLE IF EXISTS sino_dc_ads_dev.client_segmentation_no_advertising_effect_20250807_opendateMB_randomized_9999;																		
+CREATE TABLE sino_dc_ads_dev.client_segmentation_no_advertising_effect_20250807_opendateMB_randomized_9999 LIFECYCLE 180 AS																		
+select * from sino_dc_ads_dev.tmp_client_segmentation_raw_no_advertising_effect_20250807_opendateMB																		
+ORDER BY																		
+    RAND() -- 核心步骤：对筛选出来的结果进行随机排序																		
+LIMIT 9999; -- 核心步骤：取出随机排序后的前9999条数据																		
+																		
+select * from sino_dc_ads_dev.client_segmentation_no_advertising_effect_20250807_opendateMB_randomized_9999;																		
